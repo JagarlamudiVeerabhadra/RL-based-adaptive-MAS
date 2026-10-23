@@ -77,5 +77,11 @@ def get_mongo_db(required: bool = False) -> Optional[Database]:
     """Get the active MongoDB database instance."""
     client = get_mongo_client(required=required)
     if client is not None:
+        try:
+            default_db = client.get_default_database()
+            if default_db is not None:
+                return default_db
+        except Exception:
+            pass
         return client[settings.mongodb_db_name]
     return None

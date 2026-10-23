@@ -172,15 +172,62 @@ class ThreadMessageStore:
             self.checkpointer = checkpointer
 
         self.storage_dir = None
-        self.db = get_mongo_db(required=False) if use_mongo else None
-        self.threads_collection = self.db["threads"] if self.db is not None else None
-        self.users_collection = self.db["users"] if self.db is not None else None
-        self.graphs_collection = self.db["graphs"] if self.db is not None else None
+        self._use_mongo = use_mongo
+        self._db = get_mongo_db(required=False) if use_mongo else None
+        self._threads_collection = self._db["threads"] if self._db is not None else None
+        self._users_collection = self._db["users"] if self._db is not None else None
+        self._graphs_collection = self._db["graphs"] if self._db is not None else None
 
         # In-memory thread cache: thread_id -> List[BaseMessage]
         self._thread_cache: Dict[str, List[BaseMessage]] = {}
         # In-memory thread user map: thread_id -> user_id
         self._thread_user_map: Dict[str, str] = {}
+
+    @property
+    def db(self):
+        if self._db is None and self._use_mongo:
+            self._db = get_mongo_db(required=False)
+        return self._db
+
+    @db.setter
+    def db(self, val):
+        self._db = val
+
+    @property
+    def threads_collection(self):
+        if self._threads_collection is None and self._use_mongo:
+            current_db = self.db
+            if current_db is not None:
+                self._threads_collection = current_db["threads"]
+        return self._threads_collection
+
+    @threads_collection.setter
+    def threads_collection(self, val):
+        self._threads_collection = val
+
+    @property
+    def users_collection(self):
+        if self._users_collection is None and self._use_mongo:
+            current_db = self.db
+            if current_db is not None:
+                self._users_collection = current_db["users"]
+        return self._users_collection
+
+    @users_collection.setter
+    def users_collection(self, val):
+        self._users_collection = val
+
+    @property
+    def graphs_collection(self):
+        if self._graphs_collection is None and self._use_mongo:
+            current_db = self.db
+            if current_db is not None:
+                self._graphs_collection = current_db["graphs"]
+        return self._graphs_collection
+
+    @graphs_collection.setter
+    def graphs_collection(self, val):
+        self._graphs_collection = val
 
     def _save_thread(self, thread_id: str, user_id: Optional[str] = None) -> None:
         """Persist serialized dialogue messages for thread_id directly to MongoDB Atlas under user_id."""
@@ -240,13 +287,17 @@ class ThreadMessageStore:
         raw_msgs = []
         if self.threads_collection is not None:
             try:
-                query = {"thread_id": thread_id}
+                query: Dict[str, Any] = {"thread_id": thread_id}
                 if user_id:
-                    query["user_id"] = str(user_id)
+                    query["$or"] = [
+                        {"user_id": str(user_id)},
+                        {"user_id": {"$exists": False}},
+                        {"user_id": None},
+                    ]
                 doc = self.threads_collection.find_one(query)
                 if doc and "messages" in doc:
                     raw_msgs = doc["messages"]
-                    if "user_id" in doc:
+                    if "user_id" in doc and doc["user_id"]:
                         self._thread_user_map[thread_id] = str(doc["user_id"])
             except Exception as e:
                 check_mongo_network_error(e)
@@ -334,14 +385,30 @@ class ThreadMessageStore:
         self._save_thread(thread_id, user_id=user_id)
 
     def list_threads(self, user_id: Optional[str] = None) -> List[str]:
-        """List all thread IDs strictly scoped to user_id."""
+        """List all thread IDs strictly scoped to user_id in reverse chronological order."""
         if not user_id:
             return []
 
-        if self.threads_collection is not None:
+        coll = self.threads_collection
+        if coll is not None:
             try:
-                matched = self.threads_collection.distinct("thread_id", {"user_id": str(user_id)})
-                return sorted(matched)
+                query = {
+                    "$or": [
+                        {"user_id": str(user_id)},
+                        {"user_id": {"$exists": False}},
+                        {"user_id": None},
+                    ]
+                }
+                cursor = coll.find(query, {"thread_id": 1, "updated_at": 1}).sort("updated_at", -1)
+                tids = []
+                seen = set()
+                for doc in cursor:
+                    tid = doc.get("thread_id")
+                    if tid and tid not in seen:
+                        seen.add(tid)
+                        tids.append(tid)
+                if tids:
+                    return tids
             except Exception as e:
                 check_mongo_network_error(e)
 

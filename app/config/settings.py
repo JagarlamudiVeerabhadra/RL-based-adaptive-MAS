@@ -13,8 +13,8 @@ class Settings(BaseModel):
     model: str = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
     max_tokens: int = int(os.getenv("MAX_TOKENS", "4096"))
 
-    # MongoDB Atlas Configuration
-    mongodb_uri: str = os.getenv("MONGODB_URI", "")
+    # MongoDB Atlas Configuration (supports both MONGODB_URI and MONGO_URI)
+    mongodb_uri: str = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI", "")
     mongodb_db_name: str = os.getenv("MONGODB_DB_NAME", "adaptive_mas")
 
     langchain_tracing_v2: bool = (
