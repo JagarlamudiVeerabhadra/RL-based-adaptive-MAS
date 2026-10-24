@@ -285,20 +285,32 @@ class ThreadMessageStore:
     def _load_thread(self, thread_id: str, user_id: Optional[str] = None) -> List[BaseMessage]:
         """Load messages for thread_id directly from MongoDB Atlas, strictly scoped to user_id."""
         raw_msgs = []
-        if self.threads_collection is not None:
+        coll = self.threads_collection
+        if coll is not None:
             try:
                 query: Dict[str, Any] = {"thread_id": thread_id}
                 if user_id:
-                    query["$or"] = [
-                        {"user_id": str(user_id)},
-                        {"user_id": {"$exists": False}},
-                        {"user_id": None},
-                    ]
-                doc = self.threads_collection.find_one(query)
+                    user_id_candidates: List[Any] = [str(user_id)]
+                    try:
+                        from bson import ObjectId
+                        if ObjectId.is_valid(str(user_id)):
+                            user_id_candidates.append(ObjectId(str(user_id)))
+                    except Exception:
+                        pass
+                    query["user_id"] = {"$in": user_id_candidates}
+
+                doc = coll.find_one(query)
                 if doc and "messages" in doc:
                     raw_msgs = doc["messages"]
                     if "user_id" in doc and doc["user_id"]:
                         self._thread_user_map[thread_id] = str(doc["user_id"])
+                elif user_id and self.users_collection is not None:
+                    user_doc = self.users_collection.find_one({"_id": {"$in": user_id_candidates}})
+                    if user_doc and "threads" in user_doc and isinstance(user_doc["threads"], dict):
+                        thread_payload = user_doc["threads"].get(thread_id)
+                        if thread_payload and "messages" in thread_payload:
+                            raw_msgs = thread_payload["messages"]
+                            self._thread_user_map[thread_id] = str(user_id)
             except Exception as e:
                 check_mongo_network_error(e)
 
@@ -392,13 +404,15 @@ class ThreadMessageStore:
         coll = self.threads_collection
         if coll is not None:
             try:
-                query = {
-                    "$or": [
-                        {"user_id": str(user_id)},
-                        {"user_id": {"$exists": False}},
-                        {"user_id": None},
-                    ]
-                }
+                user_id_candidates: List[Any] = [str(user_id)]
+                try:
+                    from bson import ObjectId
+                    if ObjectId.is_valid(str(user_id)):
+                        user_id_candidates.append(ObjectId(str(user_id)))
+                except Exception:
+                    pass
+
+                query = {"user_id": {"$in": user_id_candidates}}
                 cursor = coll.find(query, {"thread_id": 1, "updated_at": 1}).sort("updated_at", -1)
                 tids = []
                 seen = set()
@@ -407,8 +421,16 @@ class ThreadMessageStore:
                     if tid and tid not in seen:
                         seen.add(tid)
                         tids.append(tid)
-                if tids:
-                    return tids
+
+                if self.users_collection is not None:
+                    user_doc = self.users_collection.find_one({"_id": {"$in": user_id_candidates}})
+                    if user_doc and "threads" in user_doc and isinstance(user_doc["threads"], dict):
+                        for tid in user_doc["threads"].keys():
+                            if tid and tid not in seen:
+                                seen.add(tid)
+                                tids.append(tid)
+
+                return tids
             except Exception as e:
                 check_mongo_network_error(e)
 

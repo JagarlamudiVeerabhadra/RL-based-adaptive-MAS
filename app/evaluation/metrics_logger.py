@@ -40,8 +40,22 @@ class MetricsLogger:
         self.evaluator = TheoreticalArchitectureEvaluator()
 
         from app.memory.mongo_client import get_mongo_db
-        self.db = get_mongo_db(required=True)
-        self.runs_collection = self.db["runs"] if self.db is not None else None
+        self.db = get_mongo_db(required=False)
+        self._runs_collection = self.db["runs"] if self.db is not None else None
+
+    @property
+    def runs_collection(self):
+        if self._runs_collection is None:
+            from app.memory.mongo_client import get_mongo_db
+            current_db = get_mongo_db(required=False)
+            if current_db is not None:
+                self.db = current_db
+                self._runs_collection = current_db["runs"]
+        return self._runs_collection
+
+    @runs_collection.setter
+    def runs_collection(self, val):
+        self._runs_collection = val
 
     def _init_tensorboard(self) -> None:
         """Initialize TensorBoard SummaryWriter safely."""
@@ -210,13 +224,44 @@ class MetricsLogger:
 
         records: List[Dict[str, Any]] = []
 
+        user_id_candidates: List[Any] = [str(user_id)]
+        try:
+            from bson import ObjectId
+            if ObjectId.is_valid(str(user_id)):
+                user_id_candidates.append(ObjectId(str(user_id)))
+        except Exception:
+            pass
+
+        user_threads: List[str] = []
+        try:
+            from app.memory.store import default_thread_store
+            user_threads = default_thread_store.list_threads(user_id=str(user_id))
+        except Exception:
+            pass
+
         # 1. Fetch from MongoDB Atlas runs collection
-        if self.runs_collection is not None:
+        coll = self.runs_collection
+        if coll is not None:
             try:
-                query: Dict[str, Any] = {"user_id": str(user_id)}
                 if thread_id:
-                    query["thread_id"] = str(thread_id)
-                cursor = self.runs_collection.find(query).sort("step", -1).limit(100)
+                    query: Dict[str, Any] = {
+                        "thread_id": str(thread_id),
+                        "$or": [
+                            {"user_id": {"$in": user_id_candidates}},
+                            {"user_id": None},
+                            {"user_id": {"$exists": False}},
+                            {"user_id": ""},
+                        ],
+                    }
+                else:
+                    match_conditions: List[Dict[str, Any]] = [
+                        {"user_id": {"$in": user_id_candidates}},
+                    ]
+                    if user_threads:
+                        match_conditions.append({"thread_id": {"$in": user_threads}})
+                    query = {"$or": match_conditions}
+
+                cursor = coll.find(query).sort("step", -1).limit(100)
                 for doc in cursor:
                     doc_copy = dict(doc)
                     if "_id" in doc_copy:
@@ -236,8 +281,17 @@ class MetricsLogger:
                             continue
                         try:
                             rec = json.loads(line)
-                            if str(rec.get("user_id")) == str(user_id):
-                                if not thread_id or str(rec.get("thread_id")) == str(thread_id):
+                            rec_user = str(rec.get("user_id") or "")
+                            rec_thread = str(rec.get("thread_id") or "")
+                            user_matches = rec_user and rec_user == str(user_id)
+                            thread_matches = bool(thread_id and rec_thread == str(thread_id))
+                            thread_owned = bool(user_threads and rec_thread in user_threads)
+
+                            if thread_id:
+                                if thread_matches and (user_matches or not rec_user):
+                                    records.append(rec)
+                            else:
+                                if user_matches or thread_owned:
                                     records.append(rec)
                         except Exception:
                             continue

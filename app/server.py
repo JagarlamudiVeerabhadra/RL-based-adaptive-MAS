@@ -112,6 +112,11 @@ class ChatRequest(BaseModel):
     conversationId: Optional[str] = Field(None, description="Conversation / thread ID")
     thread_id: Optional[str] = Field(None, description="Alias for conversation ID")
     user_id: Optional[str] = Field(None, description="Authenticated user ID")
+    userId: Optional[str] = Field(None, description="CamelCase alias for user ID")
+
+    @property
+    def resolved_user_id(self) -> Optional[str]:
+        return self.user_id or self.userId
 
 
 class ChatResponse(BaseModel):
@@ -167,14 +172,15 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="A message is required")
 
     thread_id = request.conversationId or request.thread_id or "thread-1"
+    resolved_uid = request.resolved_user_id
     start_time = time.perf_counter()
     state["step_counter"] += 1
     step = state["step_counter"]
 
-    logger.info("[Task #%d | Thread: %s | User: %s] Processing: '%s'", step, thread_id, request.user_id, task[:80])
+    logger.info("[Task #%d | Thread: %s | User: %s] Processing: '%s'", step, thread_id, resolved_uid, task[:80])
 
     try:
-        result = orchestrator.run_dynamic(task, thread_id=thread_id, user_id=request.user_id)
+        result = orchestrator.run_dynamic(task, thread_id=thread_id, user_id=resolved_uid)
     except Exception as exc:
         logger.error("Error executing dynamic runtime: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"AMAS execution error: {str(exc)}")
@@ -220,7 +226,7 @@ def chat(request: ChatRequest):
                 result=result,
                 architecture=final_arch,
                 required_capabilities=req_caps,
-                user_id=request.user_id,
+                user_id=resolved_uid,
                 thread_id=thread_id,
             )
 
@@ -305,7 +311,7 @@ def chat(request: ChatRequest):
             orchestrator.thread_store.save_latest_graph(
                 thread_id=thread_id,
                 graph_png_base64=b64_str,
-                user_id=request.user_id,
+                user_id=resolved_uid,
             )
             latest_graph_url = f"data:image/png;base64,{b64_str}"
     except Exception as graph_err:
@@ -329,15 +335,16 @@ class FeedbackRequest(BaseModel):
 
 
 @app.get("/threads")
-def list_threads(user_id: Optional[str] = None):
+def list_threads(user_id: Optional[str] = None, userId: Optional[str] = None):
+    effective_user_id = user_id or userId
     orchestrator: AdaptiveRuntimeOrchestrator = state.get("orchestrator")
     if not orchestrator:
         raise HTTPException(status_code=503, detail="Orchestrator not ready")
-    threads = orchestrator.thread_store.list_threads(user_id=user_id)
+    threads = orchestrator.thread_store.list_threads(user_id=effective_user_id)
     thread_list = []
     for tid in threads:
-        stats = orchestrator.thread_store.get_thread_stats(tid, user_id=user_id)
-        msgs = orchestrator.thread_store.get_messages(tid, user_id=user_id)
+        stats = orchestrator.thread_store.get_thread_stats(tid, user_id=effective_user_id)
+        msgs = orchestrator.thread_store.get_messages(tid, user_id=effective_user_id)
         snippet = ""
         for m in msgs:
             content = getattr(m, "content", "")
@@ -355,11 +362,12 @@ def list_threads(user_id: Optional[str] = None):
 
 
 @app.get("/threads/{thread_id}/messages")
-def get_thread_messages(thread_id: str, user_id: Optional[str] = None):
+def get_thread_messages(thread_id: str, user_id: Optional[str] = None, userId: Optional[str] = None):
+    effective_user_id = user_id or userId
     orchestrator: AdaptiveRuntimeOrchestrator = state.get("orchestrator")
     if not orchestrator:
         raise HTTPException(status_code=503, detail="Orchestrator not ready")
-    msgs = orchestrator.thread_store.get_serialized_messages(thread_id, user_id=user_id)
+    msgs = orchestrator.thread_store.get_serialized_messages(thread_id, user_id=effective_user_id)
     return {"thread_id": thread_id, "messages": msgs}
 
 
@@ -389,11 +397,12 @@ def submit_feedback(req: FeedbackRequest):
 
 
 @app.get("/threads/{thread_id}/graph")
-def get_thread_graph(thread_id: str, user_id: Optional[str] = None):
+def get_thread_graph(thread_id: str, user_id: Optional[str] = None, userId: Optional[str] = None):
+    effective_user_id = user_id or userId
     orchestrator: AdaptiveRuntimeOrchestrator = state.get("orchestrator")
     if not orchestrator:
         raise HTTPException(status_code=503, detail="Orchestrator not ready")
-    graph_b64 = orchestrator.thread_store.get_latest_graph(thread_id, user_id=user_id)
+    graph_b64 = orchestrator.thread_store.get_latest_graph(thread_id, user_id=effective_user_id)
     if not graph_b64:
         return {"thread_id": thread_id, "graph": None}
     return {
@@ -403,15 +412,23 @@ def get_thread_graph(thread_id: str, user_id: Optional[str] = None):
 
 
 @app.get("/metrics")
-def get_metrics(user_id: Optional[str] = None, thread_id: Optional[str] = None):
+def get_metrics(
+    user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    userId: Optional[str] = None,
+    threadId: Optional[str] = None,
+):
     """Retrieve multi-agent execution and RL adaptation metrics strictly scoped to user_id."""
+    effective_user_id = user_id or userId
+    effective_thread_id = thread_id or threadId
+
     metrics_logger: MetricsLogger = state.get("metrics_logger")
     if not metrics_logger:
         raise HTTPException(status_code=503, detail="Metrics logger not initialized")
-    if not user_id:
+    if not effective_user_id:
         return {
             "user_id": None,
-            "thread_id": thread_id,
+            "thread_id": effective_thread_id,
             "summary": {
                 "total_runs": 0,
                 "total_tokens": 0,
@@ -425,7 +442,7 @@ def get_metrics(user_id: Optional[str] = None, thread_id: Optional[str] = None):
             "complexity_breakdown": {},
             "runs": [],
         }
-    return metrics_logger.get_user_metrics(user_id=user_id, thread_id=thread_id)
+    return metrics_logger.get_user_metrics(user_id=effective_user_id, thread_id=effective_thread_id)
 
 
 @app.get("/benchmarks")
