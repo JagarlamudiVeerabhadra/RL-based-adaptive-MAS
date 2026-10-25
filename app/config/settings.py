@@ -45,6 +45,9 @@ class Settings(BaseModel):
     critic_quality_threshold: float = float(os.getenv("CRITIC_QUALITY_THRESHOLD", "0.80"))
     critic_max_retries: int = int(os.getenv("CRITIC_MAX_RETRIES", "3"))
 
+    # Internal Service Secret Authentication (Server-to-Server security)
+    internal_service_secret: str = os.getenv("INTERNAL_SERVICE_SECRET", "")
+
 
 settings = Settings()
 

@@ -14,8 +14,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request
+from starlette.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Ensure workspace root is on sys.path
@@ -98,13 +98,33 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+@app.middleware("http")
+async def verify_internal_secret_middleware(request: Request, call_next):
+    """Enforce shared internal service secret on non-public endpoints."""
+    # Allow public endpoints (health checks, monitoring, docs) and preflight requests
+    public_paths = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
+    if request.url.path in public_paths or request.method == "OPTIONS":
+        return await call_next(request)
+
+    expected_secret = (settings.internal_service_secret or "").strip()
+    if expected_secret:
+        header_secret = request.headers.get("x-internal-secret")
+        auth_header = request.headers.get("authorization") or ""
+        bearer_secret = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else ""
+
+        provided_secret = header_secret or bearer_secret
+        if not provided_secret or provided_secret != expected_secret:
+            client_ip = request.client.host if request.client else "unknown"
+            logger.warning("Blocked unauthorized request to '%s' from %s", request.url.path, client_ip)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Unauthorized: Invalid or missing internal service secret."},
+            )
+
+    return await call_next(request)
+
+
 
 
 class ChatRequest(BaseModel):
