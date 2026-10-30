@@ -5,6 +5,7 @@ Connects frontend/backend chat requests to the dynamic multi-agent orchestrator.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -13,6 +14,8 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import JSONResponse
@@ -83,9 +86,46 @@ async def lifespan(app: FastAPI):
     state["orchestrator"] = orchestrator
     logger.info("RL_Based_AMAS orchestrator initialized successfully.")
 
+    # 5. Background Keep-Alive Task (Optional: preserves Render 750 free hours by defaulting to OFF)
+    keep_alive_task = None
+    enable_247_pings = os.getenv("ENABLE_247_KEEP_ALIVE", "false").lower() == "true"
+    external_url = (
+        os.getenv("RENDER_EXTERNAL_URL")
+        or os.getenv("KEEP_ALIVE_URL")
+        or os.getenv("SELF_URL")
+        or ""
+    ).strip().rstrip("/")
+
+    async def _keep_alive_loop(target_url: str):
+        logger.info("[Keep-Alive] 24/7 stay-awake loop active for %s (interval: 600s)", target_url)
+        # Initial sleep to let server finish binding port
+        await asyncio.sleep(20)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            while True:
+                try:
+                    resp = await client.get(f"{target_url}/health")
+                    logger.info("[Keep-Alive] Self-ping to %s returned HTTP %d", target_url, resp.status_code)
+                except Exception as exc:
+                    logger.warning("[Keep-Alive] Self-ping to %s encountered error: %s", target_url, exc)
+                # Sleep 10 minutes
+                await asyncio.sleep(600)
+
+    if enable_247_pings and external_url and external_url.startswith("http"):
+        keep_alive_task = asyncio.create_task(_keep_alive_loop(external_url))
+        logger.info("[Keep-Alive] 24/7 stay-awake enabled for: %s", external_url)
+    else:
+        logger.info("[Keep-Alive] 24/7 self-ping disabled by default to preserve Render 750 free-tier monthly hours. Container will sleep when idle and wake on demand.")
+
     yield
 
     # Teardown
+    if keep_alive_task:
+        keep_alive_task.cancel()
+        try:
+            await keep_alive_task
+        except asyncio.CancelledError:
+            pass
+
     if state.get("metrics_logger"):
         state["metrics_logger"].close()
     logger.info("RL_Based_AMAS runtime stopped.")
@@ -102,8 +142,8 @@ app = FastAPI(
 @app.middleware("http")
 async def verify_internal_secret_middleware(request: Request, call_next):
     """Enforce shared internal service secret on non-public endpoints."""
-    # Allow public endpoints (health checks, monitoring, docs) and preflight requests
-    public_paths = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
+    # Allow public endpoints (health checks, keep-alive, monitoring, docs) and preflight requests
+    public_paths = {"/", "/health", "/ping", "/wake", "/docs", "/redoc", "/openapi.json"}
     if request.url.path in public_paths or request.method == "OPTIONS":
         return await call_next(request)
 
@@ -164,6 +204,25 @@ def health():
     return {
         "status": "healthy",
         "orchestrator_ready": state.get("orchestrator") is not None,
+    }
+
+
+@app.get("/ping")
+def ping():
+    return {
+        "status": "pong",
+        "service": "RL_Based_AMAS",
+        "time": time.time(),
+        "ready": state.get("orchestrator") is not None,
+    }
+
+
+@app.api_route("/wake", methods=["GET", "POST"])
+def wake():
+    return {
+        "status": "awake",
+        "service": "RL_Based_AMAS",
+        "ready": state.get("orchestrator") is not None,
     }
 
 
